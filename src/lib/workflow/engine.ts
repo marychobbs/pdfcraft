@@ -78,6 +78,68 @@ export function findInputNodes(nodes: WorkflowNode[], edges: WorkflowEdge[]): Wo
 }
 
 /**
+ * Check whether a filename matches one of the node's accepted format extensions.
+ */
+export function fileMatchesAcceptedFormats(filename: string, acceptedFormats: string[]): boolean {
+    if (acceptedFormats.length === 0) return true;
+    const lower = filename.toLowerCase();
+    return acceptedFormats.some((format) => {
+        const ext = format.startsWith('.') ? format.toLowerCase() : `.${format.toLowerCase()}`;
+        return lower.endsWith(ext);
+    });
+}
+
+/**
+ * Assign uploaded files to workflow input nodes by each node's acceptedFormats.
+ * Used when multiple parallel input nodes (e.g. PNG to PDF + JPG to PDF) share one upload.
+ */
+export function distributeFilesToInputNodes(
+    files: File[],
+    inputNodes: WorkflowNode[]
+): Map<string, File[]> {
+    const distribution = new Map<string, File[]>();
+    const claimed = new Set<string>();
+
+    for (const node of inputNodes) {
+        distribution.set(node.id, []);
+    }
+
+    if (inputNodes.length === 0) {
+        return distribution;
+    }
+
+    if (inputNodes.length === 1) {
+        distribution.set(inputNodes[0].id, [...files]);
+        return distribution;
+    }
+
+    for (const node of inputNodes) {
+        const formats = node.data.acceptedFormats ?? [];
+        const matched = files.filter(
+            (f) =>
+                fileMatchesAcceptedFormats(f.name, formats) &&
+                !claimed.has(f.name)
+        );
+        matched.forEach((f) => claimed.add(f.name));
+        distribution.set(node.id, matched);
+    }
+
+    for (const file of files) {
+        if (claimed.has(file.name)) continue;
+        for (const node of inputNodes) {
+            const formats = node.data.acceptedFormats ?? [];
+            if (fileMatchesAcceptedFormats(file.name, formats)) {
+                distribution.get(node.id)!.push(file);
+                claimed.add(file.name);
+                break;
+            }
+        }
+    }
+
+    return distribution;
+}
+
+/**
  * Find output nodes (nodes with no outgoing edges)
  */
 export function findOutputNodes(nodes: WorkflowNode[], edges: WorkflowEdge[]): WorkflowNode[] {
@@ -198,8 +260,17 @@ export function validateWorkflow(
 
     // Warn if there are multiple input nodes
     if (inputNodes.length > 1) {
+        const nodeNames = inputNodes.map(n => `"${n.data.label}"`).join(', ');
         warnings.push({
-            message: `Workflow has ${inputNodes.length} input nodes. Files will be processed by each independently.`,
+            message: `Workflow has ${inputNodes.length} input nodes (${nodeNames}). Uploaded files are routed to each input node by file type (e.g. .png to PNG to PDF, .jpg to JPG to PDF).`,
+        });
+    }
+
+    // Warn if there are no input nodes
+    if (inputNodes.length === 0 && nodes.length > 0) {
+        errors.push({
+            message: 'Workflow has no input nodes. All nodes are connected in a cycle or isolated.',
+            type: 'missing-input',
         });
     }
 
